@@ -3,6 +3,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'pages/main_chat_page..dart';
 import 'pages/backend/login_page.dart';
+import 'pages/settings_page.dart';
+import 'pages/about_page.dart';
+import 'pages/help_page.dart';
 import 'services/supabase_service.dart';
 import 'utils/date_time_utils.dart';
 import 'config/app_config.dart';
@@ -25,9 +28,10 @@ void main() async {
   // Set environment-specific configurations
   final appConfig = AppConfig();
   
-  // Disable debug banner in production
+  // Disable debug banner and set up production configurations
   if (kReleaseMode) {
-    // Additional production-only setup can go here
+    // Disable logs in production
+    debugPrint = (String? message, {int? wrapWidth}) {};
   }
   
   runApp(MyApp(appConfig: appConfig));
@@ -41,7 +45,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      debugShowCheckedModeBanner: appConfig.showDebugBanner,
+      debugShowCheckedModeBanner: false, // Always disable debug banner for release
       title: appConfig.appName,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueAccent),
@@ -51,6 +55,9 @@ class MyApp extends StatelessWidget {
       routes: {
         '/': (context) => _buildHomeScreen(),
         '/chat': (context) => const ChatPage(),
+        '/settings': (context) => const SettingsPage(),
+        '/about': (context) => const AboutPage(),
+        '/help': (context) => const HelpPage(),
       },
     );
   }

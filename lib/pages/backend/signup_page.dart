@@ -179,7 +179,7 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
                                   _acceptedTerms = value ?? true;
                                 });
                               },
-                              fillColor: MaterialStateProperty.resolveWith<Color>((states) {
+                              fillColor: WidgetStateProperty.resolveWith<Color>((states) {
                                 return Colors.pinkAccent;
                               }),
                             ),

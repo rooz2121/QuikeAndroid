@@ -31,13 +31,32 @@ class SupabaseService {
     required String password,
     String? fullName,
   }) async {
+    // Make sure we have a valid full name
+    final String validFullName = fullName?.trim() ?? email.split('@').first;
+    
+    // Sign up the user with metadata
     final response = await _client.auth.signUp(
       email: email,
       password: password,
       data: {
-        'full_name': fullName,
+        'full_name': validFullName,
       },
     );
+    
+    // If signup successful and we have a user, update their metadata
+    if (response.user != null) {
+      try {
+        // Also store the user's name in the profiles table for persistence
+        await _client.from('profiles').upsert({
+          'id': response.user!.id,
+          'full_name': validFullName,
+          'email': email,
+          'updated_at': DateTime.now().toIso8601String(),
+        });
+      } catch (e) {
+        print('Error updating profile: $e');
+      }
+    }
     
     return response;
   }
@@ -87,16 +106,15 @@ class SupabaseService {
     }
   }
   
-  // Get all chat sessions for current user
+  // Get all chat sessions for the current user
   Future<List<Map<String, dynamic>>> getChatSessions() async {
-    final user = currentUser;
-    if (user == null) return [];
-    
     try {
+      if (!isLoggedIn) return [];
+      
       final response = await _client
           .from('chat_sessions')
           .select()
-          .eq('user_id', user.id)
+          .eq('user_id', currentUser!.id)
           .order('updated_at', ascending: false);
       
       // Convert UTC timestamps to IST for display
@@ -122,6 +140,101 @@ class SupabaseService {
     }
   }
   
+  // Get user settings
+  Future<Map<String, dynamic>?> getUserSettings() async {
+    try {
+      if (!isLoggedIn) return null;
+      
+      try {
+        final response = await _client
+            .from('user_settings')
+            .select()
+            .eq('user_id', currentUser!.id)
+            .single();
+        
+        return response;
+      } catch (e) {
+        if (e.toString().contains('Results contain 0 rows')) {
+          // No settings found, create default settings
+          return await _createDefaultSettings();
+        }
+        rethrow;
+      }
+    } catch (e) {
+      print('Error getting user settings: $e');
+      return null;
+    }
+  }
+  
+  // Create default settings for a new user
+  Future<Map<String, dynamic>> _createDefaultSettings() async {
+    try {
+      if (!isLoggedIn) throw 'User not logged in';
+      
+      final defaultSettings = {
+        'user_id': currentUser!.id,
+        'dark_mode': true,
+        'notifications_enabled': true,
+        'language': 'English',
+        'font_size': 16.0,
+        'created_at': DateTimeUtils.nowForSupabase(),
+        'updated_at': DateTimeUtils.nowForSupabase(),
+      };
+      
+      await _client
+          .from('user_settings')
+          .insert(defaultSettings);
+      
+      return defaultSettings;
+    } catch (e) {
+      print('Error creating default settings: $e');
+      // Return default settings even if save failed
+      return {
+        'dark_mode': true,
+        'notifications_enabled': true,
+        'language': 'English',
+        'font_size': 16.0,
+      };
+    }
+  }
+  
+  // Save user settings
+  Future<bool> saveUserSettings(Map<String, dynamic> settings) async {
+    try {
+      if (!isLoggedIn) return false;
+      
+      // Check if settings exist for this user
+      final checkResponse = await _client
+          .from('user_settings')
+          .select('id')
+          .eq('user_id', currentUser!.id);
+      
+      final List<dynamic> existingSettings = checkResponse;
+      
+      // Add user_id to settings
+      settings['user_id'] = currentUser!.id;
+      
+      if (existingSettings.isEmpty) {
+        // Create new settings
+        settings['created_at'] = DateTimeUtils.nowForSupabase();
+        await _client
+            .from('user_settings')
+            .insert(settings);
+      } else {
+        // Update existing settings
+        await _client
+            .from('user_settings')
+            .update(settings)
+            .eq('user_id', currentUser!.id);
+      }
+      
+      return true;
+    } catch (e) {
+      print('Error saving user settings: $e');
+      return false;
+    }
+  }
+  
   // Update chat session title
   Future<bool> updateChatSessionTitle(String sessionId, String newTitle) async {
     try {
@@ -129,7 +242,6 @@ class SupabaseService {
           .from('chat_sessions')
           .update({'title': newTitle, 'updated_at': DateTimeUtils.nowForSupabase()})
           .eq('id', sessionId);
-      
       return true;
     } catch (e) {
       print('Error updating chat session title: $e');
@@ -148,6 +260,42 @@ class SupabaseService {
       return true;
     } catch (e) {
       print('Error deleting chat session: $e');
+      return false;
+    }
+  }
+  
+  // Clear all chat sessions for the current user
+  Future<bool> clearAllChatSessions() async {
+    try {
+      if (!isLoggedIn) return false;
+      
+      // First get all session IDs for the current user
+      final sessionsResponse = await _client
+          .from('chat_sessions')
+          .select('id')
+          .eq('user_id', currentUser!.id);
+      
+      final List<dynamic> sessions = sessionsResponse;
+      if (sessions.isEmpty) return true; // No sessions to delete
+      
+      // Delete all messages from these sessions
+      for (var session in sessions) {
+        final String sessionId = session['id'];
+        await _client
+            .from('chat_messages')
+            .delete()
+            .eq('session_id', sessionId);
+      }
+      
+      // Then delete all sessions
+      await _client
+          .from('chat_sessions')
+          .delete()
+          .eq('user_id', currentUser!.id);
+      
+      return true;
+    } catch (e) {
+      print('Error clearing all chat sessions: $e');
       return false;
     }
   }
@@ -222,4 +370,76 @@ class SupabaseService {
 
   // Get session
   Session? get currentSession => _client.auth.currentSession;
+  
+  // Get user profile information with fallback mechanisms
+  Future<Map<String, dynamic>?> getUserProfile() async {
+    try {
+      // First try to get the user profile from the profiles table
+      final user = _client.auth.currentUser;
+      if (user == null) return null;
+      
+      try {
+        final response = await _client
+            .from('profiles')
+            .select()
+            .eq('id', user.id)
+            .maybeSingle(); // Use maybeSingle instead of single to avoid exceptions
+        
+        if (response != null) {
+          return response;
+        }
+      } catch (dbError) {
+        print('Error getting user profile from database: $dbError');
+        // Continue to fallback mechanisms
+      }
+      
+      // If we get here, try to get the user metadata
+      if (user.userMetadata != null && user.userMetadata!.isNotEmpty) {
+        return user.userMetadata!;
+      }
+      
+      // Last resort: return basic info from the auth user
+      return {
+        'id': user.id,
+        'email': user.email,
+        'full_name': user.email?.split('@').first ?? 'User',
+      };
+    } catch (e) {
+      print('Error in getUserProfile: $e');
+      // Return a default profile to prevent app crashes
+      return {
+        'id': 'guest',
+        'email': 'guest@quike.ai',
+        'full_name': 'Guest User',
+      };
+    }
+  }
+  
+  // Create a new user profile
+  Future<Map<String, dynamic>?> _createUserProfile() async {
+    try {
+      if (!isLoggedIn) return null;
+      
+      final user = currentUser!;
+      final String fullName = user.userMetadata?['full_name'] as String? ?? 
+                             user.email?.split('@').first ?? 'User';
+      
+      final profileData = {
+        'id': user.id,
+        'email': user.email,
+        'full_name': fullName,
+        'created_at': DateTimeUtils.nowForSupabase(),
+        'updated_at': DateTimeUtils.nowForSupabase(),
+      };
+      
+      await _client
+          .from('profiles')
+          .upsert(profileData);
+      
+      return profileData;
+    } catch (e) {
+      print('Error creating user profile: $e');
+      return null;
+    }
+  }
 }

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_highlight/flutter_highlight.dart';
+import 'package:flutter_highlight/themes/atom-one-dark.dart';
 import 'text_enhancer.dart';
 
 class CodeHighlighter {
@@ -131,7 +133,7 @@ class TextSegment extends MessageSegment {
   }
 }
 
-// Code block segment
+  // Code block segment
 class CodeSegment extends MessageSegment {
   final String code;
   final String? language;
@@ -140,6 +142,49 @@ class CodeSegment extends MessageSegment {
   
   @override
   Widget buildWidget(BuildContext context) {
+    // Normalize language code for the highlighter
+    String lang = language?.toLowerCase() ?? 'plaintext';
+    
+    // Map common language names to ones supported by highlight.js
+    final Map<String, String> languageMapping = {
+      'py': 'python',
+      'js': 'javascript',
+      'ts': 'typescript',
+      'jsx': 'javascript',
+      'tsx': 'typescript',
+      'csharp': 'cs',
+      'c#': 'cs',
+      'sh': 'bash',
+      'shell': 'bash',
+      'yml': 'yaml',
+      'rust': 'rust',
+      'rs': 'rust',
+      'go': 'go',
+      'golang': 'go',
+      'rb': 'ruby',
+      'kt': 'kotlin',
+      'plaintext': 'plaintext',
+      'txt': 'plaintext',
+      'json': 'json',
+      'xml': 'xml',
+      'html': 'html',
+      'css': 'css',
+      'scss': 'scss',
+      'md': 'markdown',
+      'sql': 'sql',
+      'php': 'php',
+      'java': 'java',
+      'swift': 'swift',
+      'c': 'c',
+      'cpp': 'cpp',
+      'c++': 'cpp',
+      'dart': 'dart',
+      'dockerfile': 'dockerfile',
+    };
+    
+    // Use the mapped language or the original if not found
+    lang = languageMapping[lang] ?? lang;
+    
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 8),
       decoration: BoxDecoration(
@@ -150,67 +195,70 @@ class CodeSegment extends MessageSegment {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (language != null)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.grey[850],
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(7),
-                  topRight: Radius.circular(7),
-                ),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    language!,
-                    style: TextStyle(
-                      color: Colors.grey[400],
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.copy, size: 16),
-                    color: Colors.grey[400],
-                    onPressed: () {
-                      // Copy code to clipboard
-                      Clipboard.setData(ClipboardData(text: code));
-                      
-                      // Show a snackbar or toast to indicate copied
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: const Text('Code copied to clipboard'),
-                          backgroundColor: Colors.blueAccent,
-                          duration: const Duration(seconds: 2),
-                          behavior: SnackBarBehavior.floating,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                      );
-                    },
-                    constraints: const BoxConstraints(
-                      minWidth: 24,
-                      minHeight: 24,
-                    ),
-                    padding: EdgeInsets.zero,
-                    splashRadius: 16,
-                  ),
-                ],
+          // Language header with copy button
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.grey[850],
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(7),
+                topRight: Radius.circular(7),
               ),
             ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  language != null ? language! : 'Code',
+                  style: TextStyle(
+                    color: Colors.grey[400],
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.copy, size: 16),
+                  color: Colors.grey[400],
+                  onPressed: () {
+                    // Copy code to clipboard
+                    Clipboard.setData(ClipboardData(text: code));
+                    
+                    // Show a snackbar to indicate copied
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: const Text('Code copied to clipboard'),
+                        backgroundColor: Colors.blueAccent,
+                        duration: const Duration(seconds: 2),
+                        behavior: SnackBarBehavior.floating,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                    );
+                  },
+                  constraints: const BoxConstraints(
+                    minWidth: 24,
+                    minHeight: 24,
+                  ),
+                  padding: EdgeInsets.zero,
+                  splashRadius: 16,
+                ),
+              ],
+            ),
+          ),
+          // Code content with syntax highlighting
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: SelectableText(
+            child: SizedBox(
+              width: 2000, // Large enough to avoid wrapping in most cases
+              child: HighlightView(
                 code,
-                style: const TextStyle(
-                  color: Colors.greenAccent,
-                  fontSize: 14,
+                language: lang,
+                theme: atomOneDarkTheme,
+                padding: const EdgeInsets.all(12),
+                textStyle: const TextStyle(
                   fontFamily: 'monospace',
+                  fontSize: 14,
                 ),
               ),
             ),
@@ -238,9 +286,10 @@ class InlineCodeSegment extends MessageSegment {
       child: Text(
         code,
         style: const TextStyle(
-          color: Colors.greenAccent,
+          color: Color(0xFFE0E0E0), // Light gray for better readability
           fontSize: 14,
           fontFamily: 'monospace',
+          fontWeight: FontWeight.w500,
         ),
       ),
     );

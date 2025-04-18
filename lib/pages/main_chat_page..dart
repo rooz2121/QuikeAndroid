@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:animated_background/animated_background.dart';
 import '../services/groq_service.dart';
 import '../utils/code_highlighter.dart';
@@ -29,6 +30,14 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   bool _isLoadingSessions = false;
   bool _isCreatingSession = false;
   
+  // Confirmation system state
+  bool _isConfirmationPending = false;
+  String _pendingAction = '';
+  String _pendingConfirmationContext = '';
+  
+  // Feedback system state
+  final Map<String, String> _messageFeedback = {}; // Maps message ID to feedback type ('like' or 'dislike')
+  
   // Initialize Groq service using app configuration
   final GroqService _groqService = GroqService();
   final SupabaseService _supabaseService = SupabaseService();
@@ -51,8 +60,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     // Load chat sessions
     _loadChatSessions();
     
-    // Create a new session if authenticated
-    Future.microtask(() => _createNewSession());
+    // No longer creating a new session automatically
+    // Session will be created when user sends first message
   }
   
   // Load chat sessions from Supabase
@@ -86,6 +95,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     
     setState(() {
       _isCreatingSession = true;
+      // Clear existing messages when creating a new chat
       _messages.clear();
     });
     
@@ -100,46 +110,42 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
     
     try {
+      // Create a new session with default name
       final session = await _supabaseService.createChatSession('New Chat');
       
       if (session != null) {
         final newSession = ChatSession.fromJson(session);
         
+        // Add welcome message
+        final welcomeMessage = ChatMessage(
+          text: "Hello! I'm Quike AI, your personal assistant. How can I help you today?",
+          isUser: false,
+          timestamp: DateTimeUtils.nowInIndia(),
+        );
+        
         setState(() {
           _chatSessions.insert(0, newSession);
           _currentSessionId = newSession.id;
           _isCreatingSession = false;
+          _messages.add(welcomeMessage);
         });
-        
-        // Add welcome message
-        _messages.add(
-          ChatMessage(
-            text: "Hello! I'm Quike AI, your personal assistant. How can I help you today?",
-            isUser: false,
-            timestamp: DateTimeUtils.nowInIndia(),
-          ),
-        );
         
         // Save welcome message to database
         await _supabaseService.saveChatMessage(
           newSession.id,
-          "Hello! I'm Quike AI, your personal assistant. How can I help you today?",
+          welcomeMessage.text,
           false,
         );
+        
+        // Scroll to the welcome message
+        Future.delayed(const Duration(milliseconds: 100), () {
+          _scrollToBottom();
+        });
       }
     } catch (e) {
       print('Error creating new session: $e');
       setState(() {
         _isCreatingSession = false;
-        
-        // Add welcome message even if session creation fails
-        _messages.add(
-          ChatMessage(
-            text: "Hello! I'm Quike AI, your personal assistant. How can I help you today?",
-            isUser: false,
-            timestamp: DateTimeUtils.nowInIndia(),
-          ),
-        );
       });
     }
   }
@@ -154,31 +160,30 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     try {
       final messages = await _supabaseService.getChatMessages(sessionId);
       
-      setState(() {
-        _messages.addAll(
-          messages.map((json) {
-            final messageModel = ChatMessageModel.fromJson(json);
-            final messageMap = messageModel.toMessageMap();
-            return ChatMessage(
-              text: messageMap['text'],
-              isUser: messageMap['isUser'],
-              timestamp: messageMap['timestamp'],
-            );
-          }).toList(),
+      final chatMessages = messages.map((json) {
+        final messageModel = ChatMessageModel.fromJson(json);
+        final messageMap = messageModel.toMessageMap();
+        return ChatMessage(
+          text: messageMap['text'],
+          isUser: messageMap['isUser'],
+          timestamp: messageMap['timestamp'],
         );
+      }).toList();
+      
+      setState(() {
+        _messages.addAll(chatMessages);
         _currentSessionId = sessionId;
         _isTyping = false;
       });
       
-      // Scroll to bottom
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
+      // More reliable scroll to bottom with a slight delay to ensure rendering is complete
+      Future.delayed(const Duration(milliseconds: 100), () {
+        _scrollToBottom();
+      });
+      
+      // Also add another delayed scroll for extra reliability
+      Future.delayed(const Duration(milliseconds: 500), () {
+        _scrollToBottom();
       });
     } catch (e) {
       print('Error loading session messages: $e');
@@ -195,13 +200,25 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       
       if (success) {
         setState(() {
+          // Remove the deleted session from the list
           _chatSessions.removeWhere((session) => session.id == sessionId);
           
-          // If the current session was deleted, create a new one
+          // If the current session was deleted
           if (_currentSessionId == sessionId) {
             _currentSessionId = null;
             _messages.clear();
-            _createNewSession();
+            
+            // Add only the welcome message to the UI without creating a new session
+            _messages.add(ChatMessage(
+              text: "Hello! I'm Quike AI, your personal assistant. How can I help you today?",
+              isUser: false,
+              timestamp: DateTimeUtils.nowInIndia(),
+            ));
+            
+            // Close the sidebar if it's open
+            if (_isSidebarOpen) {
+              _toggleSidebar();
+            }
           }
         });
       }
@@ -218,6 +235,27 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     // Create a new session if none exists
     if (_currentSessionId == null) {
       await _createNewSession();
+      
+      // If we just created a new session, also save the welcome message
+      // that was previously only in the UI
+      if (_currentSessionId != null && _messages.isNotEmpty) {
+        // Find the welcome message (should be the first one)
+        final welcomeMessage = _messages.firstWhere(
+          (msg) => !msg.isUser,
+          orElse: () => ChatMessage(
+            text: "Hello! I'm Quike AI, your personal assistant. How can I help you today?",
+            isUser: false,
+            timestamp: DateTimeUtils.nowInIndia(),
+          ),
+        );
+        
+        // Save welcome message to database
+        await _supabaseService.saveChatMessage(
+          _currentSessionId!,
+          welcomeMessage.text,
+          false,
+        );
+      }
     }
     
     final userMessage = ChatMessage(
@@ -231,6 +269,16 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       _isTyping = true;
     });
     
+    // Check if this is a confirmation response to a specific proposal
+    // Only process as confirmation if we're actually waiting for one AND have a specific action pending
+    if (_isConfirmationPending && 
+        _pendingAction.isNotEmpty && 
+        _pendingAction != 'general_question' && 
+        _isConfirmationResponse(text)) {
+      await _processConfirmation(text);
+      return;
+    }
+    
     // Save user message to database if session exists
     if (_currentSessionId != null) {
       await _supabaseService.saveChatMessage(
@@ -242,21 +290,102 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     
     // Scroll to bottom
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
+      _scrollToBottom();
     });
     
     try {
-      // Get response from Groq API
-      final response = await _groqService.generateResponse(text);
+      // Determine if this is a direct question from the user
+      bool isDirectQuestion = text.trim().toLowerCase().startsWith('what') ||
+                            text.trim().toLowerCase().startsWith('how') ||
+                            text.trim().toLowerCase().startsWith('why') ||
+                            text.trim().toLowerCase().startsWith('when') ||
+                            text.trim().toLowerCase().startsWith('where') ||
+                            text.trim().toLowerCase().startsWith('who') ||
+                            text.trim().toLowerCase().startsWith('which') ||
+                            text.trim().toLowerCase().contains('?');
       
-      // Check if response contains code
-      final hasCode = response.contains('```');
+      // If this is a direct question, we should reset any pending confirmation state
+      if (isDirectQuestion && _isConfirmationPending) {
+        _isConfirmationPending = false;
+        _pendingAction = '';
+        _pendingConfirmationContext = '';
+      }
+      
+      // Determine which prompt to use
+      String prompt;
+      String systemPrompt;
+      
+      if (_isConfirmationPending && _pendingAction == 'recommendations_request') {
+        // The AI provided a list of recommendations and the user wants more or specific ones
+        prompt = text;
+        systemPrompt = """You are Quike AI, a helpful and friendly assistant. 
+        
+The user has responded to your list of recommendations. You previously shared a list and asked if they wanted more specific recommendations. 
+Context of previous message: $_pendingConfirmationContext
+
+If their response is 'yes' or similar, provide more detailed recommendations or options based on the category you were discussing. Do not ask for confirmation again - just provide more recommendations.
+
+If they specified a particular type/genre/category, focus your recommendations on that specific request.
+
+If the user's response is clearly a new question unrelated to recommendations, answer that new question instead.""";
+      } else if (_isConfirmationPending && _pendingAction == 'information_request') {
+        // The AI offered information and the user responded with a simple 'yes'
+        prompt = text;
+        systemPrompt = """You are Quike AI, a helpful and friendly assistant. 
+        
+The user has expressed interest in learning more about the topic you previously discussed. 
+Context of previous message: $_pendingConfirmationContext
+
+Provide detailed, informative content about the topic. Be thorough but concise. Do not ask for further confirmation - just provide the information.
+
+If the user's response is clearly a new question unrelated to the previous topic, answer that new question instead.""";
+      } else if (_isConfirmationPending && _pendingAction == 'question') {
+        // The AI asked a question and the user is responding to it
+        prompt = text;
+        systemPrompt = """You are Quike AI, a helpful and friendly assistant.
+        
+The user is responding to a question you asked. Your previous message was: $_pendingConfirmationContext
+
+Treat the user's input as a direct response to your question unless it clearly introduces a new, unrelated topic.
+Provide a helpful, informative response based on their answer. Do not ask for further confirmation unless necessary.
+
+If their response is ambiguous or unclear, provide the most helpful response you can based on your best interpretation.""";
+      } else if (_isConfirmationPending && _pendingAction != 'general_question' && _pendingAction != 'information_request' && _pendingAction != 'question' && _pendingAction != 'recommendations_request') {
+        // We're in confirmation mode for a specific action
+        prompt = "The user responded to your proposal with: '$text'. Based on this response, should you proceed with the proposed action? If yes, respond with the implementation. If no, acknowledge and ask what they would prefer instead.";
+        systemPrompt = "You are Quike AI, a helpful assistant. You previously proposed an action and are now determining if the user has confirmed it. The pending action is: $_pendingAction. Context: $_pendingConfirmationContext. If the user clearly confirmed, implement the change. If they declined, acknowledge and ask for their preference. If unclear, ask for clarification.";
+      } else if (_isConfirmationPending && _pendingAction == 'general_question') {
+        // We're responding to a general question, not a specific action proposal
+        prompt = text;
+        systemPrompt = "You are Quike AI, a helpful and friendly assistant. The user is asking a direct question. Provide a clear, concise, and informative answer. Do not ask for confirmation before answering - just provide the best answer you can.";
+      } else {
+        // Normal mode - not in confirmation flow
+        prompt = text;
+        systemPrompt = "You are Quike AI, a helpful and friendly assistant. When suggesting changes or implementations, first explain your plan and ask for confirmation before proceeding. For direct questions, provide clear and concise answers without asking for confirmation. Always be helpful, accurate, and to the point.";
+      }
+      
+      final response = await _groqService.sendMessageWithSystemPrompt(prompt, systemPrompt);
+      
+      // Check if this response is asking for confirmation
+      final bool isAskingConfirmation = _detectConfirmationRequest(response);
+      
+      // Update confirmation state if needed
+      if (isAskingConfirmation && !_isConfirmationPending) {
+        _isConfirmationPending = true;
+        _pendingAction = _extractProposedAction(response);
+        _pendingConfirmationContext = response;
+      } else if (!isAskingConfirmation && response.toLowerCase().contains('?')) {
+        // If it's a question but not a confirmation request, mark it as a general question
+        // This helps distinguish between confirmation requests and general questions
+        _isConfirmationPending = true;
+        _pendingAction = 'general_question';
+        _pendingConfirmationContext = response;
+      } else if (_isConfirmationPending) {
+        // Reset confirmation state after handling the response
+        _isConfirmationPending = false;
+        _pendingAction = '';
+        _pendingConfirmationContext = '';
+      }
       
       final aiMessage = ChatMessage(
         text: response,
@@ -275,12 +404,11 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           _currentSessionId!,
           response,
           false,
-          hasCode: hasCode,
         );
         
         // Update session title if it's the first message
         if (_messages.length == 3) { // Welcome message + user message + AI response
-          final title = text.length > 30 ? text.substring(0, 27) + '...' : text;
+          final title = text.length > 30 ? '${text.substring(0, 27)}...' : text;
           await _supabaseService.updateChatSessionTitle(_currentSessionId!, title);
           
           // Refresh chat sessions to get updated title
@@ -329,17 +457,370 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     });
   }
   
-  // Get user info from Supabase
-  void _getUserInfo() {
-    final supabaseService = SupabaseService();
-    final user = supabaseService.currentUser;
-    if (user != null) {
+  // Check if the user's response is a confirmation
+  bool _isConfirmationResponse(String text) {
+    final String normalizedText = text.toLowerCase().trim();
+    
+    // Simple yes/no responses
+    bool isSimpleConfirmation = 
+           normalizedText == 'yes' || 
+           normalizedText == 'ok' || 
+           normalizedText == 'sure' || 
+           normalizedText == 'proceed' || 
+           normalizedText == 'go ahead' || 
+           normalizedText == 'confirm' || 
+           normalizedText == 'approved' ||
+           normalizedText == 'do it';
+    
+    // Action-oriented confirmation phrases
+    bool isActionConfirmation =
+           normalizedText.contains('yes do it') ||
+           normalizedText.contains('yes, do it') ||
+           normalizedText.contains('ok do it') ||
+           normalizedText.contains('ok, do it') ||
+           normalizedText.contains('sure do it') ||
+           normalizedText.contains('please do it') ||
+           normalizedText.contains('yes assist me') ||
+           normalizedText.contains('yes, assist me') ||
+           normalizedText.contains('ok assist me') ||
+           normalizedText.contains('assist me') ||
+           normalizedText.contains('yes help me') ||
+           normalizedText.contains('help me with this');
+    
+    // Responses that start with confirmation words
+    bool startsWithConfirmation = 
+           normalizedText.startsWith('yes,') || 
+           normalizedText.startsWith('ok,') || 
+           normalizedText.startsWith('sure,') ||
+           normalizedText.startsWith('yes i') ||
+           normalizedText.startsWith('yes please');
+    
+    // Longer affirmative responses
+    bool isLongerConfirmation = 
+           normalizedText.contains('sounds good') ||
+           normalizedText.contains('that works') ||
+           normalizedText.contains('please do') ||
+           normalizedText.contains('go for it') ||
+           normalizedText.contains('go ahead with it') ||
+           normalizedText.contains('that would be great') ||
+           normalizedText.contains('i would like that');
+    
+    return isSimpleConfirmation || isActionConfirmation || startsWithConfirmation || isLongerConfirmation;
+  }
+  
+  // Process a confirmation response from the user
+  Future<void> _processConfirmation(String text) async {
+    // Save user message to database if session exists
+    if (_currentSessionId != null) {
+      await _supabaseService.saveChatMessage(
+        _currentSessionId!,
+        text,
+        true,
+      );
+    }
+    
+    try {
+      final String normalizedText = text.toLowerCase().trim();
+      final bool isConfirmed = _isConfirmationResponse(normalizedText);
+      
+      // Create a special system prompt for handling the confirmation
+      final String systemPrompt = isConfirmed
+          ? "You are Quike AI. The user has confirmed your proposal. Implement the solution you suggested and explain what you've done. Be thorough but concise."
+          : "You are Quike AI. The user has declined your proposal. Acknowledge their decision respectfully and ask what alternative approach they would prefer."; 
+      
+      // Create a special prompt that includes the context
+      final String prompt = isConfirmed
+          ? "I am confirming your proposal. Please implement what you suggested regarding: $_pendingAction"
+          : "I am declining your proposal about: $_pendingAction. Please suggest an alternative approach."; 
+      
+      // Get response from Groq API
+      final response = await _groqService.sendMessageWithSystemPrompt(prompt, systemPrompt);
+      
+      final aiMessage = ChatMessage(
+        text: response,
+        isUser: false,
+        timestamp: DateTimeUtils.nowInIndia(),
+      );
+      
       setState(() {
-        _userEmail = user.email;
-        _userName = user.userMetadata?['full_name'] as String? ?? 'User';
+        _isTyping = false;
+        _messages.add(aiMessage);
+        // Reset confirmation state
+        _isConfirmationPending = false;
+        _pendingAction = '';
+        _pendingConfirmationContext = '';
       });
+      
+      // Save AI response to database if session exists
+      if (_currentSessionId != null) {
+        await _supabaseService.saveChatMessage(
+          _currentSessionId!,
+          response,
+          false,
+        );
+      }
+      
+      // Scroll to bottom
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    } catch (e) {
+      final errorMessage = ChatMessage(
+        text: "Sorry, I encountered an error processing your confirmation: ${e.toString()}",
+        isUser: false,
+        timestamp: DateTimeUtils.nowInIndia(),
+      );
+      
+      setState(() {
+        _isTyping = false;
+        _messages.add(errorMessage);
+        // Reset confirmation state on error
+        _isConfirmationPending = false;
+        _pendingAction = '';
+        _pendingConfirmationContext = '';
+      });
+      
+      // Save error message to database if session exists
+      if (_currentSessionId != null) {
+        await _supabaseService.saveChatMessage(
+          _currentSessionId!,
+          "Sorry, I encountered an error processing your confirmation: ${e.toString()}",
+          false,
+        );
+      }
     }
   }
+  
+  // Detect if the AI response is asking for confirmation for a specific action
+  // or asking a question that expects a response
+  bool _detectConfirmationRequest(String response) {
+    final String normalizedText = response.toLowerCase();
+    
+    // Check for numbered or bulleted lists (common in option presentations)
+    bool containsListFormat = RegExp(r'\d+\.\s+[A-Z]').hasMatch(response) || // Numbered list (1. Item)
+                             RegExp(r'•\s+[A-Z]').hasMatch(response) ||      // Bullet points
+                             RegExp(r'\*\s+[A-Z]').hasMatch(response);      // Asterisk bullets
+    
+    // If response contains a list format, it's likely presenting options, not asking for confirmation
+    if (containsListFormat) {
+      return false;
+    }
+    
+    // Check if the response is asking a question that expects a response
+    // This includes questions about preferences, follow-up questions, etc.
+    bool isAskingQuestion = response.trim().endsWith('?');
+    int questionMarkCount = '?'.allMatches(response).length;
+    
+    // Check for lists of items (common in recommendations, options, etc.)
+    bool containsNumberedList = RegExp(r'\d+\.\s+[A-Za-z]').hasMatch(response);
+    bool containsBulletList = RegExp(r'•\s+[A-Za-z]').hasMatch(response) || RegExp(r'\*\s+[A-Za-z]').hasMatch(response);
+    bool containsList = containsNumberedList || containsBulletList;
+    
+    // Special case for lists followed by a question - this is likely a recommendation list
+    // followed by asking if the user wants more or has specific preferences
+    if (containsList && isAskingQuestion) {
+      // This is a list with a question at the end, like game recommendations followed by
+      // "Is there a specific genre you're interested in?" or "Would you like more recommendations?"
+      return true;
+    }
+    
+    // If the last sentence ends with a question mark, it's likely expecting a response
+    if (isAskingQuestion) {
+      // Check if it's offering information and asking if the user wants more
+      bool isOfferingInformation = 
+             (normalizedText.contains('would you like to know more') || 
+             normalizedText.contains('would you like to learn more') ||
+             normalizedText.contains('would you like me to explain') ||
+             normalizedText.contains('would you like more information') ||
+             normalizedText.contains('would you like to hear more') ||
+             normalizedText.contains('would you like recommendations') ||
+             normalizedText.contains('i can provide more') ||
+             normalizedText.contains('i can recommend more') ||
+             normalizedText.contains('or is there something specific'));
+      
+      if (isOfferingInformation) {
+        return true; // This is a special type of confirmation request for information
+      }
+      
+      // If there's only one question mark and it's at the end, it's likely a simple question
+      // that expects a direct response
+      if (questionMarkCount == 1) {
+        return true;
+      }
+    }
+    
+    // Check if the response is directly asking a question that expects a specific answer
+    bool isAskingDirectQuestion = 
+           normalizedText.contains('what specific') || 
+           normalizedText.contains('which one') || 
+           normalizedText.contains('what would you like') || 
+           normalizedText.contains('what are you interested') ||
+           normalizedText.contains('what aspect') ||
+           normalizedText.contains('what type') ||
+           normalizedText.contains('what kind') ||
+           normalizedText.contains('what topic') ||
+           (normalizedText.contains('would you like to') && normalizedText.contains('discuss'));
+    
+    // If it's asking a direct question about preferences, it's not a confirmation request
+    if (isAskingDirectQuestion) {
+      return false;
+    }
+    
+    // Check if the response is primarily informational (contains multiple sentences without action items)
+    int sentenceCount = RegExp(r'[.!?]\s+[A-Z]').allMatches(response).length + 1;
+    if (sentenceCount > 3 && !normalizedText.contains('would you like me to')) {
+      return false; // Likely an informational response, not asking for confirmation
+    }
+    
+    // Check if the response contains phrases that indicate a specific proposal
+    bool containsSpecificProposal = 
+           (normalizedText.contains('i can') && !normalizedText.contains('i can help') && !normalizedText.contains('i can explain') && !normalizedText.contains('i can assist')) || 
+           (normalizedText.contains('i could') && !normalizedText.contains('i could help') && !normalizedText.contains('i could explain')) || 
+           normalizedText.contains('i will implement') || 
+           normalizedText.contains('i would implement') ||
+           normalizedText.contains('i will create') ||
+           normalizedText.contains('i would create') ||
+           normalizedText.contains('i will add') ||
+           normalizedText.contains('i would add');
+    
+    // Check for confirmation-seeking phrases
+    bool hasConfirmationPhrase = 
+           normalizedText.contains('would you like me to') || 
+           normalizedText.contains('should i proceed') || 
+           normalizedText.contains('would you like to proceed') || 
+           normalizedText.contains('shall i proceed') || 
+           normalizedText.contains('do you want me to') || 
+           (normalizedText.contains('would you prefer') && !normalizedText.contains('would you prefer to learn about')) || 
+           normalizedText.contains('is that okay') || 
+           normalizedText.contains('is this what you want') || 
+           normalizedText.contains('would you like that') || 
+           normalizedText.contains('should i implement') || 
+           normalizedText.contains('would you like me to implement') ||
+           (normalizedText.contains('would you') && normalizedText.contains('confirm'));
+    
+    // Only detect as confirmation request if there's a specific proposal AND a confirmation-seeking phrase
+    return containsSpecificProposal && hasConfirmationPhrase;
+  }
+  
+  // Extract the proposed action from the AI response
+  String _extractProposedAction(String response) {
+    final String normalizedText = response.toLowerCase();
+    
+    // Check for lists of items followed by a question (common in recommendations)
+    bool containsNumberedList = RegExp(r'\d+\.\s+[A-Za-z]').hasMatch(response);
+    bool containsBulletList = RegExp(r'•\s+[A-Za-z]').hasMatch(response) || RegExp(r'\*\s+[A-Za-z]').hasMatch(response);
+    bool containsList = containsNumberedList || containsBulletList;
+    bool endsWithQuestion = response.trim().endsWith('?');
+    
+    // If it contains a list and ends with a question, it's likely a recommendation list
+    // followed by asking if the user wants more specific recommendations
+    if (containsList && endsWithQuestion) {
+      if (normalizedText.contains('genre') || 
+          normalizedText.contains('type') || 
+          normalizedText.contains('recommend') || 
+          normalizedText.contains('interested in') ||
+          normalizedText.contains('i can provide more')) {
+        return 'recommendations_request';
+      }
+    }
+    
+    // Check if this is an information offering response
+    if (normalizedText.contains('would you like to know more') || 
+        normalizedText.contains('would you like to learn more') ||
+        normalizedText.contains('would you like me to explain') ||
+        normalizedText.contains('would you like more information') ||
+        normalizedText.contains('would you like to hear more') ||
+        normalizedText.contains('would you like recommendations') ||
+        normalizedText.contains('i can provide more') ||
+        normalizedText.contains('i can recommend more') ||
+        (normalizedText.contains('is there something specific') && normalizedText.contains('like to ask'))) {
+      return 'information_request';
+    }
+    
+    // Check if this is a question expecting a response
+    if (endsWithQuestion) {
+      // If it's a simple question at the end of the message, mark it as a question
+      // This helps with context tracking for follow-up responses
+      return 'question';
+    }
+    
+    // This is a simplified extraction - in a real app, you might use more sophisticated NLP
+    // For now, we'll extract action-oriented sentences
+    final sentences = response.split(RegExp(r'(?<=[.!?])\s+'));
+    
+    for (final sentence in sentences) {
+      final lowerSentence = sentence.toLowerCase();
+      
+      // Implementation-related actions
+      if (lowerSentence.contains('i will implement') || lowerSentence.contains('i would implement')) {
+        return 'implement';
+      }
+      
+      // Creation-related actions
+      if (lowerSentence.contains('i will create') || lowerSentence.contains('i would create')) {
+        return 'create';
+      }
+      
+      // Addition-related actions
+      if (lowerSentence.contains('i will add') || lowerSentence.contains('i would add')) {
+        return 'add';
+      }
+      
+      // Help-related actions
+      if (lowerSentence.contains('i can help') || lowerSentence.contains('i could help')) {
+        return 'help';
+      }
+    }
+    
+    // If no specific action is found, return a generic action
+    return 'proceed';
+  }
+  
+  // Get user info from Supabase
+  Future<void> _getUserInfo() async {
+    try {
+      // Use the new getUserProfile method to get consistent user information
+      final profileData = await _supabaseService.getUserProfile();
+      
+      if (profileData != null) {
+        setState(() {
+          _userEmail = profileData['email'] ?? 'No email';
+          _userName = profileData['full_name'] ?? 'User';
+        });
+        
+        print('User info retrieved: $_userName, $_userEmail');
+      } else {
+        // Fallback to basic info if profile couldn't be retrieved
+        final user = _supabaseService.currentUser;
+        if (user != null) {
+          setState(() {
+            _userEmail = user.email ?? 'No email';
+            _userName = user.email?.split('@').first ?? 'User';
+          });
+        }
+      }
+    } catch (e) {
+      print('Error retrieving user info: $e');
+      // Fallback to basic info in case of error
+      final user = _supabaseService.currentUser;
+      if (user != null) {
+        setState(() {
+          _userEmail = user.email ?? 'No email';
+          _userName = user.email?.split('@').first ?? 'User';
+        });
+      }
+    }
+  }
+  
+
+  
+
   
   // Sign out from Supabase
   void _signOut() async {
@@ -384,8 +865,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       }
     }
   }
-  
-  // These methods are implemented below
   
   // This method was removed as it's no longer used
 
@@ -682,15 +1161,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                 _toggleSidebar();
                 _createNewSession();
               }),
-              _topMenuButton(Icons.settings_outlined, 'Settings', () {
-                _toggleSidebar();
-                _showSettingsPage();
-              }),
-              _topMenuButton(Icons.info_outline, 'About', () {
-                _toggleSidebar();
-                _showAboutDialog();
-              }),
-              _topMenuButton(Icons.logout, 'Sign Out', _signOut),
+              _topMenuButton(Icons.settings_outlined, 'Settings', _showSettingsPage),
+              _topMenuButton(Icons.help_outline, 'Help', _showHelpPage),
+              _topMenuButton(Icons.info_outline, 'About', _showAboutPage),
             ],
           ),
         ),
@@ -829,8 +1302,36 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           ),
         ),
         
-        // Extra spacing at the bottom
-        const SizedBox(height: 16),
+        // Spacer to push the sign out button to the bottom
+        const Spacer(),
+        
+        // Sign out button at the bottom of sidebar
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          margin: const EdgeInsets.only(bottom: 24),
+          child: InkWell(
+            onTap: _signOut,
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey.withOpacity(0.3)),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.logout, color: Colors.white70, size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    'Sign Out',
+                    style: TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -862,9 +1363,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   }
   
   // This method was removed as it's no longer used
-  
 
-  
   Widget _buildMessagesList() {
     return ListView.builder(
       controller: _scrollController,
@@ -955,7 +1454,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                 if (!message.isUser) _buildAvatar(isUser: false),
                 if (!message.isUser) const SizedBox(width: 8),
                 Text(
-                  message.isUser ? 'You' : 'Quike AI',
+                  message.isUser ? (_userName ?? 'You') : 'Quike AI',
                   style: TextStyle(
                     color: message.isUser ? Colors.blueAccent : Colors.pinkAccent,
                     fontWeight: FontWeight.bold,
@@ -1012,17 +1511,77 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   )
                 else
                   _buildMessageWithCodeHighlighting(message.text),
-                // Time indicator with no extra spacing
-                Align(
-                  alignment: Alignment.bottomRight,
-                  child: Text(
-                    _formatTime(message.timestamp),
-                    style: TextStyle(
-                      color: Colors.grey[400],
-                      fontSize: 12,
+                // Add feedback buttons for AI messages (except welcome message)
+                if (!message.isUser && message.text != "Hello! I'm Quike AI, your personal assistant. How can I help you today?")
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        // Like button
+                        _buildFeedbackButton(
+                          icon: _getFeedbackIcon(message, 'like'),
+                          tooltip: 'Like',
+                          onPressed: () => _handleFeedback(message, 'like'),
+                          color: _getFeedbackColor(message, 'like'),
+                        ),
+                        const SizedBox(width: 8),
+                        // Dislike button
+                        _buildFeedbackButton(
+                          icon: _getFeedbackIcon(message, 'dislike'),
+                          tooltip: 'Dislike',
+                          onPressed: () => _handleFeedback(message, 'dislike'),
+                          color: _getFeedbackColor(message, 'dislike'),
+                        ),
+                        const SizedBox(width: 8),
+                        // Copy button
+                        _buildFeedbackButton(
+                          icon: Icons.copy_outlined,
+                          tooltip: 'Copy',
+                          onPressed: () => _copyMessageToClipboard(message.text),
+                        ),
+                        const SizedBox(width: 12),
+                        // Time indicator
+                        Text(
+                          _formatTime(message.timestamp),
+                          style: TextStyle(
+                            color: Colors.grey[400],
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                // Only show timestamp for welcome message
+                else if (!message.isUser && message.text == "Hello! I'm Quike AI, your personal assistant. How can I help you today?")
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        // Time indicator only
+                        Text(
+                          _formatTime(message.timestamp),
+                          style: TextStyle(
+                            color: Colors.grey[400],
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  // Time indicator for user messages
+                  Align(
+                    alignment: Alignment.bottomRight,
+                    child: Text(
+                      _formatTime(message.timestamp),
+                      style: TextStyle(
+                        color: Colors.grey[400],
+                        fontSize: 12,
+                      ),
                     ),
                   ),
-                ),
               ],
             ),
           ),
@@ -1036,11 +1595,13 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     final List<MessageSegment> segments = CodeHighlighter.parseMessageWithCode(message);
     
     if (segments.length == 1 && segments.first is TextSegment) {
-      // If there's only regular text, check for bold formatting
-      if (message.contains('**')) {
+      // If there's only regular text, check for bullet points or bold formatting
+      if (_containsBulletPoints(message)) {
+        return _formatBulletPoints(message);
+      } else if (message.contains('**')) {
         return _formatBoldText(message);
       } else {
-        // No code or bold formatting, display normally
+        // No code, bullet points, or bold formatting, display normally
         return Text(
           message,
           style: TextStyle(
@@ -1056,14 +1617,25 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: segments.map((segment) {
+        // Apply bullet point formatting to text segments if needed
+        if (segment is TextSegment && _containsBulletPoints(segment.text)) {
+          return _formatBulletPoints(segment.text);
+        }
         // Apply bold formatting to text segments
-        if (segment is TextSegment && segment.text.contains('**')) {
+        else if (segment is TextSegment && segment.text.contains('**')) {
           return _formatBoldText(segment.text);
         } else {
           return segment.buildWidget(context);
         }
       }).toList(),
     );
+  }
+  
+  // Helper method to check if text contains bullet points
+  bool _containsBulletPoints(String text) {
+    // Check for lines starting with asterisks (*) or bullet points (•)
+    final RegExp bulletRegex = RegExp(r'(^|\n)\s*\*\s', multiLine: true);
+    return bulletRegex.hasMatch(text);
   }
   
   // Helper method to format bold text
@@ -1122,6 +1694,78 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     return RichText(
       text: TextSpan(children: spans),
       softWrap: true,
+    );
+  }
+  
+  // Helper method to format bullet points
+  Widget _formatBulletPoints(String text) {
+    // Split the text into lines
+    final lines = text.split('\n');
+    final List<Widget> lineWidgets = [];
+    
+    // Base text style
+    final baseStyle = TextStyle(
+      color: Colors.white.withOpacity(0.95),
+      fontSize: 15,
+    );
+    
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i].trim();
+      
+      // Check if this line is a bullet point (starts with * followed by space or text)
+      if (line.startsWith('*')) {
+        // Extract the content after the bullet
+        final bulletContent = line.startsWith('* ') 
+            ? line.substring(2) // For asterisks with space
+            : line.substring(1); // For asterisks without space
+        
+        lineWidgets.add(
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8.0),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Bullet point symbol
+                const Padding(
+                  padding: EdgeInsets.only(top: 3.0, right: 4.0),
+                  child: Text('•', 
+                    style: TextStyle(
+                      color: Colors.white, 
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold
+                    )
+                  ),
+                ),
+                const SizedBox(width: 6),
+                // Bullet point content
+                Expanded(
+                  child: bulletContent.contains('**') 
+                      ? _formatBoldText(bulletContent)
+                      : Text(bulletContent, style: baseStyle),
+                ),
+              ],
+            ),
+          ),
+        );
+      } else if (line.isNotEmpty) {
+        // Regular line (not a bullet point)
+        lineWidgets.add(
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8.0),
+            child: line.contains('**')
+                ? _formatBoldText(line)
+                : Text(line, style: baseStyle),
+          ),
+        );
+      } else {
+        // Empty line
+        lineWidgets.add(const SizedBox(height: 8));
+      }
+    }
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: lineWidgets,
     );
   }
   
@@ -1212,243 +1856,22 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     );
   }
   
-  // Show settings page dialog
+  // Navigate to the settings page
   void _showSettingsPage() {
-    showDialog(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.transparent,
-        child: Container(
-          width: 340,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: Colors.grey[900]?.withOpacity(0.96),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.blueAccent.withOpacity(0.7), width: 2),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.blueAccent.withOpacity(0.22),
-                blurRadius: 18,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Settings',
-                    style: TextStyle(
-                      fontSize: 24,
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.2,
-                      shadows: [
-                        Shadow(blurRadius: 8, color: Colors.blueAccent.withOpacity(0.5), offset: const Offset(0, 2)),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white70),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              
-              // Theme setting
-              _settingTile(
-                'Dark Theme',
-                'Enable dark theme for the application',
-                Icons.dark_mode,
-                true,
-                (value) {},
-              ),
-              
-              // Notifications setting
-              _settingTile(
-                'Notifications',
-                'Enable notifications (Demo only)',
-                Icons.notifications,
-                false,
-                (value) {},
-              ),
-              
-              // Sound setting
-              _settingTile(
-                'Sound Effects',
-                'Enable sound effects (Demo only)',
-                Icons.volume_up,
-                true,
-                (value) {},
-              ),
-              
-              const SizedBox(height: 20),
-              Text(
-                'Demo Mode - Settings are not saved',
-                style: TextStyle(color: Colors.grey[400], fontSize: 14),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 10),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blueAccent,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                child: const Text('Close'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+    _toggleSidebar(); // Close the sidebar
+    Navigator.pushNamed(context, '/settings');
   }
   
-  // Setting tile widget
-  Widget _settingTile(String title, String subtitle, IconData icon, bool initialValue, Function(bool) onChanged) {
-    return ListTile(
-      leading: Icon(icon, color: Colors.blueAccent),
-      title: Text(title, style: const TextStyle(color: Colors.white)),
-      subtitle: Text(subtitle, style: TextStyle(color: Colors.grey[400], fontSize: 12)),
-      trailing: Switch(
-        value: initialValue,
-        onChanged: onChanged,
-        activeColor: Colors.blueAccent,
-      ),
-    );
+  // Navigate to the about page
+  void _showAboutPage() {
+    _toggleSidebar(); // Close the sidebar
+    Navigator.pushNamed(context, '/about');
   }
   
-  // Show about dialog with credits
-  void _showAboutDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.transparent,
-        child: Container(
-          width: 340,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: Colors.grey[900]?.withOpacity(0.96),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.purpleAccent.withOpacity(0.7), width: 2),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.purpleAccent.withOpacity(0.22),
-                blurRadius: 18,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'About Quike AI',
-                    style: TextStyle(
-                      fontSize: 24,
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.2,
-                      shadows: [
-                        Shadow(blurRadius: 8, color: Colors.purpleAccent.withOpacity(0.5), offset: const Offset(0, 2)),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white70),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              
-              // App logo
-              Container(
-                width: 80,
-                height: 80,
-                decoration: BoxDecoration(
-                  color: Colors.purpleAccent.withOpacity(0.2),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.purpleAccent.withOpacity(0.7), width: 2),
-                ),
-                child: const Center(
-                  child: Icon(Icons.bolt, size: 40, color: Colors.purpleAccent),
-                ),
-              ),
-              const SizedBox(height: 16),
-              
-              // App version
-              const Text(
-                'Quike AI v1.0.0',
-                style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              
-              // App description
-              Text(
-                'Your personal AI assistant powered by Groq.',
-                style: TextStyle(color: Colors.grey[300], fontSize: 14),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 24),
-              
-              // Developer credits
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.3),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.purpleAccent.withOpacity(0.3)),
-                ),
-                child: Column(
-                  children: [
-                    const Text(
-                      'Developed by',
-                      style: TextStyle(color: Colors.grey, fontSize: 14),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Muhammed Zaheer R',
-                      style: TextStyle(
-                        color: Colors.purpleAccent,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1.1,
-                        shadows: [
-                          Shadow(blurRadius: 4, color: Colors.purpleAccent.withOpacity(0.5), offset: const Offset(0, 2)),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 20),
-              
-              // Close button
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.purpleAccent,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                child: const Text('Close'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+  // Navigate to the help page
+  void _showHelpPage() {
+    _toggleSidebar(); // Close the sidebar
+    Navigator.pushNamed(context, '/help');
   }
   
   String _formatTime(DateTime timestamp) {
@@ -1458,6 +1881,119 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   // Format date for chat history display
   String _formatDate(DateTime dateTime) {
     return DateTimeUtils.formatDate(dateTime);
+  }
+  
+  // Helper method to scroll to the bottom of the chat
+  void _scrollToBottom() {
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+  
+  // Build a feedback button (like, dislike, copy)
+  Widget _buildFeedbackButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onPressed,
+    Color? color,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(16),
+        child: Tooltip(
+          message: tooltip,
+          child: Container(
+            padding: const EdgeInsets.all(6),
+            child: Icon(
+              icon,
+              size: 16,
+              color: color ?? Colors.grey[400],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  
+  // Handle feedback (like or dislike)
+  void _handleFeedback(ChatMessage message, String feedbackType) {
+    // Generate a unique ID for the message if it doesn't exist
+    final String messageId = '${message.timestamp.millisecondsSinceEpoch}_${message.text.hashCode}';
+    
+    // Check if we're selecting or deselecting
+    final bool isDeselecting = _messageFeedback[messageId] == feedbackType;
+    
+    setState(() {
+      // If the same button is clicked again, remove the feedback
+      if (isDeselecting) {
+        _messageFeedback.remove(messageId);
+      } else {
+        // Otherwise set the new feedback type
+        _messageFeedback[messageId] = feedbackType;
+      }
+    });
+    
+    // Only show thank you message when selecting feedback, not when deselecting
+    if (!isDeselecting) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Thank you for your feedback!'),
+          duration: const Duration(seconds: 2),
+          backgroundColor: feedbackType == 'like' ? Colors.green[700] : Colors.blue[700],
+        ),
+      );
+    }
+    
+    // In a real app, you would send this feedback to your backend
+    // For example:
+    // _supabaseService.saveFeedback(_currentSessionId, message.text, feedbackType, isDeselecting);
+  }
+  
+  // Copy message text to clipboard
+  void _copyMessageToClipboard(String text) {
+    Clipboard.setData(ClipboardData(text: text));
+    
+    // Show confirmation
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Message copied to clipboard'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+  
+  // Get the appropriate icon for feedback buttons based on current state
+  IconData _getFeedbackIcon(ChatMessage message, String feedbackType) {
+    final String messageId = '${message.timestamp.millisecondsSinceEpoch}_${message.text.hashCode}';
+    final String? currentFeedback = _messageFeedback[messageId];
+    
+    if (currentFeedback == feedbackType) {
+      // Use filled icon if this feedback type is selected
+      return feedbackType == 'like' ? Icons.thumb_up : Icons.thumb_down;
+    } else {
+      // Use outlined icon otherwise
+      return feedbackType == 'like' ? Icons.thumb_up_outlined : Icons.thumb_down_outlined;
+    }
+  }
+  
+  // Get the appropriate color for feedback buttons based on current state
+  Color? _getFeedbackColor(ChatMessage message, String feedbackType) {
+    final String messageId = '${message.timestamp.millisecondsSinceEpoch}_${message.text.hashCode}';
+    final String? currentFeedback = _messageFeedback[messageId];
+    
+    if (currentFeedback == feedbackType) {
+      // Use accent color if this feedback type is selected
+      return feedbackType == 'like' ? Colors.green[400] : Colors.blue[400];
+    } else {
+      // Use default gray otherwise
+      return Colors.grey[400];
+    }
   }
 }
 
