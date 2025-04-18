@@ -10,8 +10,7 @@ An intelligent assistant application built with Flutter that provides AI-powered
 
 #### Direct APK Download
 1. **Latest Release**: Download the latest APK directly from our GitHub repository:
-   - Go to the [QuikeAndroid](https://github.com/rooz2121/QuikeAndroid) repository
-   - Navigate to `releases` folder
+   - Go to the [QuikeAndroid](https://github.com/rooz2121/QuikeAndroid/build/app/outputs/flutter-apk) repository
    - Download `quike_ai_v1.0.0.apk`
 2. **Build Version**: The current stable version is v1.0.0
 
