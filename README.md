@@ -1,6 +1,5 @@
 # Quike AI
 
-![Quike AI Logo](lib/logo/play_store_512.png)
 
 An intelligent assistant application built with Flutter that provides AI-powered conversations and assistance.
 
