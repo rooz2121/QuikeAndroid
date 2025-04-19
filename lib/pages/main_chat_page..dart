@@ -311,15 +311,26 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         _pendingConfirmationContext = '';
       }
       
-      // Determine which prompt to use
-      String prompt;
-      String systemPrompt;
+      // Default system prompt
+      String systemPrompt = """You are Quike AI, a helpful assistant embedded in a chat app.
+
+Your main goal is to understand whether the user's latest message is:
+1. A direct response to your previous question or suggestion.
+2. A new, unrelated question or command.
+
+Use this logic:
+- If you recently asked a question, treat the user's input as a response **unless** it clearly starts a new topic (like "By the way," "Also," or asks something totally different).
+- If you didn't ask a question before, treat the input as a new request.
+
+Always keep the previous message context in mind.
+
+Provide concise, accurate, and helpful responses. For direct questions, answer directly without asking for confirmation.""";
       
-      if (_isConfirmationPending && _pendingAction == 'recommendations_request') {
-        // The AI provided a list of recommendations and the user wants more or specific ones
-        prompt = text;
-        systemPrompt = """You are Quike AI, a helpful and friendly assistant. 
-        
+      // Customize system prompt for confirmation scenarios
+      if (_isConfirmationPending) {
+        if (_pendingAction == 'recommendations_request') {
+          systemPrompt = """You are Quike AI, a helpful and friendly assistant. 
+          
 The user has responded to your list of recommendations. You previously shared a list and asked if they wanted more specific recommendations. 
 Context of previous message: $_pendingConfirmationContext
 
@@ -328,57 +339,64 @@ If their response is 'yes' or similar, provide more detailed recommendations or 
 If they specified a particular type/genre/category, focus your recommendations on that specific request.
 
 If the user's response is clearly a new question unrelated to recommendations, answer that new question instead.""";
-      } else if (_isConfirmationPending && _pendingAction == 'information_request') {
-        // The AI offered information and the user responded with a simple 'yes'
-        prompt = text;
-        systemPrompt = """You are Quike AI, a helpful and friendly assistant. 
-        
+        } else if (_pendingAction == 'information_request') {
+          systemPrompt = """You are Quike AI, a helpful and friendly assistant. 
+          
 The user has expressed interest in learning more about the topic you previously discussed. 
 Context of previous message: $_pendingConfirmationContext
 
 Provide detailed, informative content about the topic. Be thorough but concise. Do not ask for further confirmation - just provide the information.
 
 If the user's response is clearly a new question unrelated to the previous topic, answer that new question instead.""";
-      } else if (_isConfirmationPending && _pendingAction == 'question') {
-        // The AI asked a question and the user is responding to it
-        prompt = text;
-        systemPrompt = """You are Quike AI, a helpful and friendly assistant.
-        
+        } else if (_pendingAction == 'question') {
+          systemPrompt = """You are Quike AI, a helpful and friendly assistant.
+          
 The user is responding to a question you asked. Your previous message was: $_pendingConfirmationContext
 
 Treat the user's input as a direct response to your question unless it clearly introduces a new, unrelated topic.
 Provide a helpful, informative response based on their answer. Do not ask for further confirmation unless necessary.
 
 If their response is ambiguous or unclear, provide the most helpful response you can based on your best interpretation.""";
-      } else if (_isConfirmationPending && _pendingAction != 'general_question' && _pendingAction != 'information_request' && _pendingAction != 'question' && _pendingAction != 'recommendations_request') {
-        // We're in confirmation mode for a specific action
-        prompt = "The user responded to your proposal with: '$text'. Based on this response, should you proceed with the proposed action? If yes, respond with the implementation. If no, acknowledge and ask what they would prefer instead.";
-        systemPrompt = "You are Quike AI, a helpful assistant. You previously proposed an action and are now determining if the user has confirmed it. The pending action is: $_pendingAction. Context: $_pendingConfirmationContext. If the user clearly confirmed, implement the change. If they declined, acknowledge and ask for their preference. If unclear, ask for clarification.";
-      } else if (_isConfirmationPending && _pendingAction == 'general_question') {
-        // We're responding to a general question, not a specific action proposal
-        prompt = text;
-        systemPrompt = "You are Quike AI, a helpful and friendly assistant. The user is asking a direct question. Provide a clear, concise, and informative answer. Do not ask for confirmation before answering - just provide the best answer you can.";
-      } else {
-        // Normal mode - not in confirmation flow
-        prompt = text;
-        systemPrompt = "You are Quike AI, a helpful and friendly assistant. When suggesting changes or implementations, first explain your plan and ask for confirmation before proceeding. For direct questions, provide clear and concise answers without asking for confirmation. Always be helpful, accurate, and to the point.";
+        }
       }
       
-      final response = await _groqService.sendMessageWithSystemPrompt(prompt, systemPrompt);
+      // Fetch the last 10 messages for conversation history
+      List<Map<String, String>> conversationHistory = [];
+      if (_currentSessionId != null) {
+        try {
+          conversationHistory = await _supabaseService.getLastMessagesForAIContext(_currentSessionId!, limit: 10);
+          print('Using ${conversationHistory.length} messages as context for AI response');
+        } catch (e) {
+          print('Error fetching conversation history: $e');
+          // Continue with empty history if there's an error
+        }
+      }
+      
+      // Generate AI response
+      String response;
+      if (conversationHistory.isNotEmpty) {
+        // Use conversation history when available
+        if (_isConfirmationPending) {
+          // For confirmation scenarios, we still use the conversation history but with a special system prompt
+          response = await _groqService.generateResponseWithHistory(text, conversationHistory);
+        } else {
+          // Standard case - use conversation history with default system prompt
+          response = await _groqService.generateResponseWithHistory(text, conversationHistory);
+        }
+      } else {
+        // Fallback to standard response generation if history is not available
+        if (_isConfirmationPending) {
+          response = await _groqService.sendMessageWithSystemPrompt(text, systemPrompt);
+        } else {
+          response = await _groqService.generateResponse(text);
+        }
+      }
       
       // Check if this response is asking for confirmation
-      final bool isAskingConfirmation = _detectConfirmationRequest(response);
-      
-      // Update confirmation state if needed
-      if (isAskingConfirmation && !_isConfirmationPending) {
-        _isConfirmationPending = true;
+      if (_detectConfirmationRequest(response)) {
+        // Extract the proposed action from the response
         _pendingAction = _extractProposedAction(response);
-        _pendingConfirmationContext = response;
-      } else if (!isAskingConfirmation && response.toLowerCase().contains('?')) {
-        // If it's a question but not a confirmation request, mark it as a general question
-        // This helps distinguish between confirmation requests and general questions
         _isConfirmationPending = true;
-        _pendingAction = 'general_question';
         _pendingConfirmationContext = response;
       } else if (_isConfirmationPending) {
         // Reset confirmation state after handling the response
@@ -448,8 +466,6 @@ If their response is ambiguous or unclear, provide the most helpful response you
       }
     }
   }
-  
-
   
   void _toggleSidebar() {
     setState(() {
@@ -533,8 +549,37 @@ If their response is ambiguous or unclear, provide the most helpful response you
           ? "I am confirming your proposal. Please implement what you suggested regarding: $_pendingAction"
           : "I am declining your proposal about: $_pendingAction. Please suggest an alternative approach."; 
       
-      // Get response from Groq API
-      final response = await _groqService.sendMessageWithSystemPrompt(prompt, systemPrompt);
+      // Fetch the last 10 messages for conversation history
+      List<Map<String, String>> conversationHistory = [];
+      if (_currentSessionId != null) {
+        try {
+          conversationHistory = await _supabaseService.getLastMessagesForAIContext(_currentSessionId!, limit: 10);
+          print('Using ${conversationHistory.length} messages as context for AI response');
+        } catch (e) {
+          print('Error fetching conversation history: $e');
+          // Continue with empty history if there's an error
+        }
+      }
+      
+      // Generate AI response
+      String response;
+      if (conversationHistory.isNotEmpty) {
+        // Use conversation history when available
+        if (_isConfirmationPending) {
+          // For confirmation scenarios, we still use the conversation history but with a special system prompt
+          response = await _groqService.generateResponseWithHistory(prompt, conversationHistory);
+        } else {
+          // Standard case - use conversation history with default system prompt
+          response = await _groqService.generateResponseWithHistory(prompt, conversationHistory);
+        }
+      } else {
+        // Fallback to standard response generation if history is not available
+        if (_isConfirmationPending) {
+          response = await _groqService.sendMessageWithSystemPrompt(prompt, systemPrompt);
+        } else {
+          response = await _groqService.generateResponse(prompt);
+        }
+      }
       
       final aiMessage = ChatMessage(
         text: response,
@@ -1171,7 +1216,7 @@ If their response is ambiguous or unclear, provide the most helpful response you
         // Chat history list
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1183,7 +1228,7 @@ If their response is ambiguous or unclear, provide the most helpful response you
                     fontSize: 18,
                   ),
                 ),
-                const SizedBox(height: 12),
+                // Remove space between label and content
                 
                 // Loading indicator
                 if (_isLoadingSessions)
@@ -1196,7 +1241,7 @@ If their response is ambiguous or unclear, provide the most helpful response you
                 else if (_chatSessions.isEmpty)
                   // No chat history placeholder
                   Padding(
-                    padding: const EdgeInsets.all(16.0),
+                    padding: const EdgeInsets.all(8.0),
                     child: Text(
                       'No chat history yet',
                       style: TextStyle(color: Colors.grey[400]),
@@ -1207,6 +1252,7 @@ If their response is ambiguous or unclear, provide the most helpful response you
                   // Chat history list
                   Expanded(
                     child: ListView.builder(
+                      padding: EdgeInsets.zero, // Remove default padding
                       itemCount: _chatSessions.length,
                       itemBuilder: (context, index) {
                         final session = _chatSessions[index];
@@ -1220,7 +1266,7 @@ If their response is ambiguous or unclear, provide the most helpful response you
                             }
                           },
                           child: Container(
-                            margin: const EdgeInsets.only(bottom: 8),
+                            margin: const EdgeInsets.only(bottom: 4),
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                             decoration: BoxDecoration(
                               color: isSelected ? Colors.blue.withOpacity(0.2) : Colors.transparent,
@@ -1302,10 +1348,10 @@ If their response is ambiguous or unclear, provide the most helpful response you
           ),
         ),
         
-        // Spacer to push the sign out button to the bottom
-        const Spacer(),
+        // Add a small fixed space instead of a flexible spacer
+        const SizedBox(height: 20),
         
-        // Sign out button at the bottom of sidebar
+        // Sign out button with proper spacing
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           margin: const EdgeInsets.only(bottom: 24),

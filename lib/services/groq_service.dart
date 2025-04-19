@@ -35,6 +35,11 @@ Provide concise, accurate, and helpful responses. For direct questions, answer d
     return _sendRequest(prompt, systemPrompt: defaultSystemPrompt);
   }
   
+  /// Generate a response using conversation history (last 10 messages)
+  Future<String> generateResponseWithHistory(String prompt, List<Map<String, String>> conversationHistory) async {
+    return _sendRequestWithHistory(prompt, conversationHistory, systemPrompt: defaultSystemPrompt);
+  }
+  
   /// Internal method to send the API request
   Future<String> _sendRequest(String prompt, {required String systemPrompt}) async {
     try {
@@ -56,6 +61,50 @@ Provide concise, accurate, and helpful responses. For direct questions, answer d
               'content': prompt
             }
           ],
+          'temperature': 0.7,
+          'max_tokens': 800,
+        }),
+      );
+      
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['choices'][0]['message']['content'];
+      } else {
+        print('Error: ${response.statusCode}');
+        print('Response: ${response.body}');
+        return 'Sorry, I encountered an error while processing your request. Please try again later.';
+      }
+    } catch (e) {
+      print('Exception: $e');
+      return 'Sorry, I encountered an error while processing your request. Please try again later.';
+    }
+  }
+  
+  /// Internal method to send the API request with conversation history
+  Future<String> _sendRequestWithHistory(String prompt, List<Map<String, String>> conversationHistory, {required String systemPrompt}) async {
+    try {
+      // Create messages array with system prompt and conversation history
+      final List<Map<String, String>> messages = [
+        {
+          'role': 'system',
+          'content': systemPrompt
+        },
+        ...conversationHistory,
+        {
+          'role': 'user',
+          'content': prompt
+        }
+      ];
+      
+      final response = await http.post(
+        Uri.parse(baseUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $apiKey',
+        },
+        body: jsonEncode({
+          'model': 'llama3-8b-8192', // Using Llama 3 8B model
+          'messages': messages,
           'temperature': 0.7,
           'max_tokens': 800,
         }),

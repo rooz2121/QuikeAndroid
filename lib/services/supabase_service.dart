@@ -356,6 +356,102 @@ class SupabaseService {
       return [];
     }
   }
+  
+  // Get the last 10 messages for a chat session and format them for AI context
+  Future<List<Map<String, String>>> getLastMessagesForAIContext(String sessionId, {int limit = 10}) async {
+    try {
+      // Get all messages for this session, ordered by creation time (newest first)
+      final response = await _client
+          .from('chat_messages')
+          .select()
+          .eq('session_id', sessionId)
+          .order('created_at', ascending: false); // Most recent first
+      
+      // Convert to list and ensure we have pairs of messages (user and AI responses)
+      final allMessages = List<Map<String, dynamic>>.from(response);
+      
+      // Make sure we have at least one message
+      if (allMessages.isEmpty) {
+        return [];
+      }
+      
+      // Prepare the result list with the most recent messages first
+      List<Map<String, dynamic>> messagesToInclude = [];
+      
+      // First, find the most recent user message and its corresponding AI response
+      Map<String, dynamic>? lastUserMessage;
+      Map<String, dynamic>? lastAIResponse;
+      
+      // Find the last user message
+      for (var message in allMessages) {
+        if (message['is_user'] == true) {
+          lastUserMessage = message;
+          break;
+        }
+      }
+      
+      // Find the last AI response (should be right after the last user message)
+      if (lastUserMessage != null) {
+        // Get the timestamp of the last user message
+        final lastUserTimestamp = DateTime.parse(lastUserMessage['created_at']);
+        
+        // Find the AI response that came after the last user message
+        for (var message in allMessages) {
+          if (message['is_user'] == false) {
+            final messageTimestamp = DateTime.parse(message['created_at']);
+            if (messageTimestamp.isAfter(lastUserTimestamp)) {
+              lastAIResponse = message;
+              break;
+            }
+          }
+        }
+      }
+      
+      // Add the last user message and AI response to our priority list if they exist
+      if (lastAIResponse != null) {
+        messagesToInclude.add(lastAIResponse);
+      }
+      if (lastUserMessage != null) {
+        messagesToInclude.add(lastUserMessage);
+      }
+      
+      // Now add other messages to provide context, up to the limit
+      // Skip messages we've already included
+      for (var message in allMessages) {
+        if (messagesToInclude.length >= limit) break;
+        
+        // Check if this message is already in our list
+        bool alreadyIncluded = false;
+        for (var includedMessage in messagesToInclude) {
+          if (includedMessage['id'] == message['id']) {
+            alreadyIncluded = true;
+            break;
+          }
+        }
+        
+        if (!alreadyIncluded) {
+          messagesToInclude.add(message);
+        }
+      }
+      
+      // Reverse the list to get chronological order (oldest first)
+      messagesToInclude = messagesToInclude.reversed.toList();
+      
+      // Format all messages for the AI context
+      final List<Map<String, String>> formattedMessages = messagesToInclude.map((message) {
+        return {
+          'role': message['is_user'] ? 'user' : 'assistant',
+          'content': message['content'].toString(),
+        };
+      }).toList();
+      
+      print('Prepared ${formattedMessages.length} messages for AI context');
+      return formattedMessages;
+    } catch (e) {
+      print('Error getting last messages for AI context: $e');
+      return [];
+    }
+  }
 
   // Reset password
   Future<void> resetPassword(String email) async {
